@@ -1,0 +1,16 @@
+# 데이터·결과는 저장소에 올리지 않는다 (협력사 제공 자료, 개인정보·영업정보 보호)
+원본/
+고객성향/
+거래처장부/
+DB/
+결과/
+공개데이터/hillstrom/
+공개데이터/bookcrossing/
+*.sqlite
+*.xls
+*.xlsx
+*.csv
+*.json
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
