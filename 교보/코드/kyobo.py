@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 import common as report
+import crm_roi
 from common import (CONTACT_FRACTION, GAIN_FRACTIONS, SCHEMA, AccountRFM, bootstrap_precision, isbn13_valid, make_models, metrics,
                     review, segment_table)
 
@@ -350,6 +351,7 @@ def run(args):
             d['segments'], d['segment_cutoff'] = book_segments(snaps[n], test)
             d['readers'] = readers(args.src, data['full'][0], test)
     save('02_models', dict(results=results, gains=gains, details=details))
+    save('04_crm_roi', crm_roi.analyze(args.src, data['full'][0], data['full'][1], data['full'][3], snaps['full'], feature_cols(snaps['full']), monthly_pick))
     rows = [(f"{r['condition']}/test/{r['strategy']}/{m}", run_id, r['condition'], 'test', r['strategy'], m, r[m], r['n'])
             for r in results for m in ('precision20', 'recall20', 'lift20', 'average_precision', 'roc_auc', 'base_rate')]
     db.executemany('INSERT INTO metrics VALUES(?,?,?,?,?,?,?,?)', rows)
@@ -390,6 +392,8 @@ def build_report(run_dir):
     qc = [('table', '자료', None), ('dimension', '관점', None), ('rule', '점검 규칙', None), ('violations', '위반', lambda v: f'{v:,}'),
           ('share', '비율', lambda v: pct(v, 2)), ('action', '처리', None)]
     bc = [('condition', '조건', None), ('split', '구간', None), ('cutoff', '기준일', None), ('customers', '도서 수', lambda v: f'{v:,}'), ('base_rate', '30일 재주문율', pct)]
+    extra = run_dir / '04_crm_roi.json'
+    extra_html = crm_roi.sections(json.loads(extra.read_text(encoding='utf8'))) if extra.exists() else ''
     rd = det['full'].get('readers')
     reader_html = '<section><h2>독자층 분석</h2><p class="note">고객성향 자료가 없다.</p></section>'
     if rd:
@@ -413,6 +417,7 @@ def build_report(run_dir):
 <section><h2>전략·조건별 평가</h2>{report.table(res, rc)}</section>
 <section><h2>도서 RFM 세분화 ({det["full"]["segment_cutoff"]} 기준)</h2><p class="note">R=마지막 판매 후 경과, F=최근 12개월 중 판매가 있던 달 수, M=12개월 판매량. 탐색 결과이며 원인으로 해석하지 않는다.</p>{report.table(seg, sc)}</section>
 {reader_html}
+{extra_html}
 <section><h2>반품 사유 (전체 기간, 권)</h2><ul>{reasons}</ul><p class="note">매입구분별 입하: {", ".join(f"{k} {v:,.0f}권" for k, v in data["buy_mix"].items())}</p></section>
 <section><h2>데이터 품질 점검</h2><p class="note">{html.escape(cfg["standard"])}</p>{report.table(q["quality"], qc)}</section>
 <section><h2>기준일별 도서 수와 재주문율</h2>{report.table(q["base_rates"], bc)}</section>
