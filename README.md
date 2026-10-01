@@ -35,6 +35,17 @@ A사가 서점 협력사 시스템(SCM)에서 볼 수 있는 입하·반품·판
 
 비용 값은 모두 `ASSUMPTIONS`에 모아 둔 가정입니다.
 
+## SQL 데이터 계층
+
+`교보/코드/sql_layer.py`, `교보/코드/sql/`
+- `schema.sql` 테이블(도서, 입하, 반품, 월별 판매, 구매자 구성, 원본 파일 해시)
+- `quality_checks.sql` 품질 점검 규칙(규칙 하나 = 쿼리 하나)
+- `features.sql` 기준일 변수(`일자 < :cutoff`로 정보 누출 방지)
+- `views.sql` 품질 플래그·정제 뷰와 출판사용 월간 지표(재주문·반품·판매, 반품 사유, 시리즈 판매, 구간별 구매자)
+- `agent_queries.sql` LLM Agent·검증기용 읽기 전용 근거 조회
+
+`test_sql_layer.py`가 SQL 결과와 Python(pandas) 결과가 같은지 대조합니다(자료가 없으면 건너뜀).
+
 ## 공개 데이터 확장 실험
 
 A사가 보유하지 않은 개인 고객·판촉 데이터를 모은다면 무엇이 가능한지 공개 데이터로 실험합니다. 회사 자료 결과와 섞지 않습니다. → `교보/공개데이터/README.md`
@@ -46,4 +57,5 @@ pip install -r requirements.txt
 cd 교보/코드
 python -m unittest          # 테스트 (가상 데이터)
 python kyobo.py             # 자료가 있을 때: ../원본/ → ../결과/
+python sql_layer.py         # 자료가 있을 때: ../DB/ 와 ../결과/SQL/
 ```
