@@ -70,6 +70,7 @@ def inject_table(df, name, rate, types, rng, eligible):
     rows = rng.choice(pool, n, replace=False)
     log, extra, missing = [], [], []
     for i, idx in enumerate(rows):
+        orig = None
         kind = types[i % len(types)]
         if kind == 'qty_zero':
             df.loc[idx, 'qty'] = 0
@@ -81,6 +82,7 @@ def inject_table(df, name, rate, types, rng, eligible):
             df.loc[idx, 'isbn'] = typo(str(df.loc[idx, 'isbn']))
         elif kind == 'qty_x10':
             cols = [c for c in CHANNELS if c in df.columns] if name == 'sales' else ['qty']
+            orig = float(df.loc[idx, cols[-1]])  # 판매는 total, 나머지는 qty. 고침 여부 판정용
             df.loc[idx, cols] = df.loc[idx, cols] * 10
         elif kind == 'date_shift':
             if name == 'sales':
@@ -91,10 +93,11 @@ def inject_table(df, name, rate, types, rng, eligible):
             new = v + sign * step
             if not lo <= new <= hi:
                 new = v - sign * step
+            orig = str(v)
             df.loc[idx, col] = new  # 양쪽 다 범위 밖이면 범위 밖 날짜가 된다(드묾)
         elif kind == 'row_missing':
             missing.append(idx)
-        log.append(dict(table=name, type=kind, row=int(idx)))
+        log.append(dict(table=name, type=kind, row=int(idx), **({'orig': orig} if kind in ('qty_x10', 'date_shift') else {})))
     if extra:
         df = pd.concat([df, *extra], ignore_index=True)
     df = df.drop(index=missing)
