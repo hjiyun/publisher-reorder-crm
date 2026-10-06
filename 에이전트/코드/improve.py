@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent.parent / '오류실험' / '코드'))
 
 import agents as ag  # noqa: E402
+import knowledge as kn  # noqa: E402
 import common  # noqa: E402
 import error_injection as ei  # noqa: E402
 import kyobo  # noqa: E402
@@ -51,7 +52,15 @@ FAMILIES = {
     'other_store': ('다른 서점의 같은 도서 재주문 신호: 최근 30·90일 건수, 작년 같은 창 여부', ['other_n_30d', 'other_n_90d', 'other_ly_event']),
     'sales_momentum': ('판매 추세: 최근 3개월 − 그 전 3개월, 최근 1개월 ÷ 12개월 월평균', ['sale_3m_change', 'sale_1m_vs_avg']),
     'new_release': ('신간 여부: 출간 6개월·12개월 이내', ['new_6m', 'new_12m']),
+    # 도서 지식 에이전트(knowledge.py)가 제목으로 분류한 도서 종류와 웹에서 찾은 시험 일정으로 만든다
+    'book_type': ('도서 종류(지식 에이전트 분류): exam_i = 대비 시험(' + ', '.join(f'exam_{i}={e}' for i, e in enumerate(kn.EXAM_TYPES[:-1])) +
+                  '), subj_i = 주제(' + ', '.join(f'subj_{i}={t}' for i, t in enumerate(kn.SUBJECTS)) + ')',
+                  [f'exam_{i}' for i in range(len(kn.EXAM_TYPES) - 1)] + [f'subj_{i}' for i in range(len(kn.SUBJECTS))]),
+    'type_season': ('같은 종류 도서의 지난해들 같은 달 재주문률(type_month_rate), 다음 달 재주문률(type_next_month_rate), 그 표본 수. '
+                    '종류 = 대비 시험(없으면 주제). 라벨이 확정된 과거 기준일만 쓴다', ['type_month_rate', 'type_next_month_rate', 'type_month_n']),
+    'exam_calendar': ('이 책이 대비하는 시험이 이번 달·다음 달에 정기 시행되는지(웹에서 찾은 시행 월 기준)', ['exam_this_month', 'exam_next_month']),
 }
+KNOWLEDGE_FAMILIES = ('book_type', 'type_season', 'exam_calendar')
 BASE_SPEC = dict(name='기준 모델', add_families=[], drop_features=[], model='boosting', max_depth=3, learning_rate=0.05, max_iter=200,
                  min_samples_leaf=20, class_weight_balanced=False, C=1.0, train_window_months=0, cleaning=[], rationale='현재 파이프라인', evidence_ids=[])
 ROUNDS = 3  # 1 경쟁 + 토론 2회
@@ -61,6 +70,9 @@ N_FOLDS, FOLD_MONTHS = 3, 6
 # 채택 기준(2026-10-06 롤링 검증 도입 시 실행 전에 정함): 세 구간을 합친 짝지은 부트스트랩에서 개선 확률 90% 이상(단측),
 # 합친 차이가 양수, 그리고 세 구간 중 2구간 이상에서 기준보다 나을 것.
 PROB_RULE, MIN_FOLDS = 0.9, 2
+# 앙상블 규칙(2026-10-06 실행 전에 정함): 검토자가 기준 모델이 아닌 안을 골랐을 때, 채택 기준을 통과했고 검토자가 거부하지 않은 안(선택안 포함)이
+# 2개 이상이면 그 예측 확률을 평균한 앙상블을 최종 산출물로 쓴다. 검토자가 기준 모델을 고르면 앙상블을 만들지 않는다.
+ENSEMBLE_RULE = '검토자가 기준 모델이 아닌 안을 고르고, 채택 기준 통과·검토자 미거부 안이 2개 이상이면 그 안들의 예측 확률 평균을 최종안으로 쓴다'
 DECISION_RULE = (f'prob_better ≥ {PROB_RULE} 그리고 delta_p20 > 0 그리고 folds_improved ≥ {MIN_FOLDS}/{N_FOLDS} '
                  '(세 검증 구간을 합쳐 같은 도서로 짝지은 부트스트랩 기준, 단측 90%)')
 
@@ -98,6 +110,40 @@ def add_families(snaps, events, other, sales):
         x[k] = v
     x['sale_1m_vs_avg'] = (x.sale_1m / (x.sale_12m / 12)).where(x.sale_12m > 0)
     x['new_6m'], x['new_12m'] = (x.age_months < 6).astype(int), (x.age_months < 12).astype(int)
+    return x
+
+
+def add_knowledge(x, know, calendar, history=None):
+    """도서 지식으로 book_type·type_season·exam_calendar 변수를 붙인다. history(라벨 있는 스냅숏)에서 라벨이 확정된 과거만 쓴다."""
+    x = x.reset_index(drop=True).copy()
+    for f in FAMILIES['book_type'][1] + FAMILIES['type_season'][1] + FAMILIES['exam_calendar'][1]:
+        x[f] = 0.0
+    if know is None or know.empty:
+        return x
+    kt = know.drop_duplicates('isbn').set_index('isbn')
+    kind = lambda d: pd.Series(np.where(d.isbn.map(kt.exam_type).fillna('해당 없음') != '해당 없음', d.isbn.map(kt.exam_type).fillna('해당 없음'),
+                                        d.isbn.map(kt.subject).fillna('기타')), index=d.index)
+    exam, subj = x.isbn.map(kt.exam_type).fillna('해당 없음'), x.isbn.map(kt.subject).fillna('기타')
+    for i, e in enumerate(kn.EXAM_TYPES[:-1]):
+        x[f'exam_{i}'] = (exam == e).astype(float)
+    for i, t in enumerate(kn.SUBJECTS):
+        x[f'subj_{i}'] = (subj == t).astype(float)
+    h = x if history is None else history
+    hist = pd.DataFrame({'type': kind(h), 'cut': pd.to_datetime(h.cutoff), 'label': h.label})
+    agg = hist.groupby(['type', 'cut']).label.agg(['sum', 'count']).reset_index()
+    agg['m'] = agg.cut.dt.month
+    types, cuts = kind(x), pd.to_datetime(x.cutoff)
+    for (t, c), idx in pd.DataFrame({'t': types, 'c': cuts}).groupby(['t', 'c']).groups.items():
+        a = agg[agg.type == t]
+        same = a[(a.m == c.month) & (a.cut <= c - pd.DateOffset(months=12))]
+        nxt = a[(a.m == c.month % 12 + 1) & (a.cut <= c - pd.DateOffset(months=11))]
+        x.loc[idx, 'type_month_rate'] = same['sum'].sum() / same['count'].sum() if same['count'].sum() else np.nan
+        x.loc[idx, 'type_next_month_rate'] = nxt['sum'].sum() / nxt['count'].sum() if nxt['count'].sum() else np.nan
+        x.loc[idx, 'type_month_n'] = float(same['count'].sum())
+    if calendar:
+        months = exam.map(lambda e: set(calendar.get(e, [])))
+        x['exam_this_month'] = [float(c.month in ms) for c, ms in zip(cuts, months)]
+        x['exam_next_month'] = [float(c.month % 12 + 1 in ms) for c, ms in zip(cuts, months)]
     return x
 
 
@@ -170,8 +216,8 @@ def make_folds(cuts, n_folds=None, size=None, dev=None, min_fit=12):
 class Lab:
     """한 서점의 자료·기준일·변수를 들고 개선안을 채점한다. 정제 조치 조합마다 스냅숏을 캐시한다."""
 
-    def __init__(self, store, other_events=None):
-        self.store = store
+    def __init__(self, store, other_events=None, know=None, calendar=None):
+        self.store, self.know, self.calendar, self.calendar_detail = store, know, calendar, None
         raw = ei.STORES[store]['load']()[:4]
         _, drop = kyobo.quality(*raw)
         self.books, rcvd, rtgd, sales = kyobo.clean(*raw, drop, True)
@@ -188,7 +234,7 @@ class Lab:
         if key not in self._cache:
             t = self.tables if not cleaning else ag.apply_actions(self.books, self.tables, cleaning)[0]
             s = kyobo.build(self.books, t['rcvd'], t['rtgd'], t['sales'], self.cuts)
-            self._cache[key] = add_families(s, t['rcvd'], self.other, t['sales'])
+            self._cache[key] = add_knowledge(add_families(s, t['rcvd'], self.other, t['sales']), self.know, self.calendar)
         return self._cache[key]
 
     def columns(self, s):
@@ -223,21 +269,27 @@ class Lab:
         ev = pd.concat([m.assign(fold=k + 1) for k, (m, _, _) in enumerate(parts)], ignore_index=True)
         return ev, np.concatenate([sc for _, sc, _ in parts]), parts[0][2]
 
-    def recommend(self, s, top=0.2):
-        """최종안을 라벨이 있는 모든 기준일로 학습하고, 판매 자료 다음 달 1일 기준으로 도서를 고른다."""
+    def next_scores(self, s):
+        """최종안을 라벨이 있는 모든 기준일로 학습하고, 다음 기준일의 도서 점수를 낸다. (다음 기준일 스냅숏, 점수)"""
         x = self.snaps(s['cleaning'])
         cols = self.columns(s)
         t = self.tables if not s['cleaning'] else ag.apply_actions(self.books, self.tables, s['cleaning'])[0]
         # 마지막 판매 달이 끝나지 않았으면(예: 예스24 10월 1~3일) 그 달 1일을 기준일로 한다
         cut = min((t['sales'].month.max() + 1).to_timestamp(), pd.Timestamp.today().normalize().replace(day=1))
         nxt = kyobo.snapshot(self.books, t['rcvd'], t['rtgd'], t['sales'], cut).assign(cutoff=str(cut.date()), label=0, split='next')
-        nxt = add_families(nxt, t['rcvd'], self.other, t['sales'])
-        sc = make_model(s).fit(x[cols], x.label).predict_proba(nxt[cols])[:, 1]
+        nxt = add_knowledge(add_families(nxt, t['rcvd'], self.other, t['sales']), self.know, self.calendar, history=x)
+        nxt = nxt.sort_values('isbn').reset_index(drop=True)
+        return nxt, make_model(s).fit(x[cols], x.label).predict_proba(nxt[cols])[:, 1]
+
+    def top_list(self, nxt, sc, top=0.2):
         k = max(1, math.ceil(len(nxt) * top))
         order = np.argsort(-sc, kind='stable')[:k]
         titles = self.books.set_index('isbn').title
-        return [dict(rank=i + 1, isbn=nxt.isbn.iloc[j], title=str(titles.get(nxt.isbn.iloc[j], '')), score=float(sc[j]), cutoff=str(cut.date()))
+        return [dict(rank=i + 1, isbn=nxt.isbn.iloc[j], title=str(titles.get(nxt.isbn.iloc[j], '')), score=float(sc[j]), cutoff=str(nxt.cutoff.iloc[0]))
                 for i, j in enumerate(order)]
+
+    def recommend(self, s, top=0.2):
+        return self.top_list(*self.next_scores(s), top)
 
 
 # ---------------------------------------------------------------- 공정 DB
@@ -261,6 +313,10 @@ CREATE TABLE evidence(evidence_id TEXT PRIMARY KEY, role TEXT, tool TEXT, input 
 CREATE TABLE agent_log(role TEXT, seconds REAL, cost_usd REAL, tool_calls TEXT, cached INTEGER);
 CREATE TABLE final_results(stage TEXT, proposal_id TEXT, val_p20 REAL, test_p20 REAL, test_ap REAL, test_delta_vs_base REAL);
 CREATE TABLE recommendations(rank INTEGER, isbn TEXT, title TEXT, score REAL, cutoff TEXT);
+CREATE TABLE book_knowledge(ref TEXT, title TEXT, genre TEXT, exam_type TEXT, subject TEXT, audience TEXT, series TEXT, agreed INTEGER, source TEXT);
+CREATE TABLE exam_calendar(exam_type TEXT, months TEXT, basis TEXT, sources TEXT);
+CREATE TABLE type_month_profile(book_type TEXT, calendar_month INTEGER, rows INTEGER, reorder_rate REAL);
+CREATE TABLE ensemble(members TEXT, rule TEXT, used_for_final INTEGER);
 '''
 DB_GUIDE = {
     'context': '서점, 라벨 정의, 기준일 구간, 검증 구간 규모(도서 1권 = 몇 %p) 등',
@@ -276,6 +332,9 @@ DB_GUIDE = {
     'proposals': '지금까지의 개선안(spec JSON 포함)',
     'scores': '개선안의 검증 점수(세 검증 구간 합산): val_p20, delta_p20(기준 대비), delta_sd(짝지은 부트스트랩 표준편차), prob_better(개선 확률), fold_deltas(구간별 기준 대비 차이), folds_improved(기준보다 나은 구간 수)',
     'debate': '라운드별 상대 안 평가',
+    'book_knowledge': '도서 지식 에이전트의 분류: 내부 번호, 제목, 대비 시험, 주제, 독자, 시리즈, A·B 일치 여부',
+    'exam_calendar': '웹에서 찾은 자격시험 정기 시행 월과 근거',
+    'type_month_profile': '도서 종류별 달력 월 재주문률(첫 검증 구간보다 앞선 자료)',
 }
 
 
@@ -291,7 +350,7 @@ def write_stage0(db, lab):
                train_cutoffs=f'{lab.cuts["train"][0]} ~ {lab.cuts["train"][-1]} ({len(lab.cuts["train"])}개)',
                val_folds=' / '.join(f'구간{k + 1} {e[0]} ~ {e[-1]}' for k, (_, e) in enumerate(lab.folds)) + ' (구간마다 그 이전 기준일로만 학습)',
                test='시험 구간은 최종 평가 전까지 공개하지 않음', val_rows=len(ev), val_selected=int(round(1 / per_book)),
-               one_book_in_p20=f'{per_book * 100:.2f}%p', other_store=OTHER[lab.store], decision_rule=DECISION_RULE)
+               one_book_in_p20=f'{per_book * 100:.2f}%p', other_store=OTHER[lab.store], decision_rule=DECISION_RULE, ensemble_rule=ENSEMBLE_RULE)
     db.executemany('INSERT INTO context VALUES(?,?)', [(k, str(v)) for k, v in ctx.items()])
     for c in lab.base_cols:
         db.execute('INSERT INTO feature_catalog VALUES(?,?,?,?)', (c, 'baseline', 1, ''))
@@ -337,6 +396,15 @@ def write_stage0(db, lab):
         for f in feats:
             v = tr[f].astype(float)
             db.execute('INSERT INTO family_signal VALUES(?,?,?)', (fam, f, float(v.corr(tr.label.astype(float))) if v.std() > 0 else None))
+    if lab.know is not None and not lab.know.empty:
+        for r in lab.know.itertuples():
+            db.execute('INSERT INTO book_knowledge VALUES(?,?,?,?,?,?,?,?,?)', (r.ref, r.title, r.genre, r.exam_type, r.subject, r.audience, r.series, int(r.agreed), r.source))
+        for e in (lab.calendar_detail or []):
+            db.execute('INSERT INTO exam_calendar VALUES(?,?,?,?)', (e['exam_type'], json.dumps(e['months']), e['basis'], json.dumps(e['sources'], ensure_ascii=False)))
+        kt = lab.know.drop_duplicates('isbn').set_index('isbn')
+        typ = np.where(tr.isbn.map(kt.exam_type).fillna('해당 없음') != '해당 없음', tr.isbn.map(kt.exam_type).fillna('해당 없음'), tr.isbn.map(kt.subject).fillna('기타'))
+        for (t, mth), g in tr.assign(_t=typ, _m=pd.to_datetime(tr.cutoff).dt.month).groupby(['_t', '_m']):
+            db.execute('INSERT INTO type_month_profile VALUES(?,?,?,?)', (t, int(mth), len(g), float(g.label.mean())))
     ws = ag.Workspace(lab.books, lab.tables)
     for t in ag.TABLES:
         for tool, args in (('table_overview', {}), ('key_uniqueness', {'keys': ['ALL']}), ('qty_ratio_outliers', {'threshold': 8}), ('temporal_consistency', {})):
@@ -449,6 +517,7 @@ PROCESS_COMMON = '''당신은 출판사의 재주문 예측을 개선하는 데�
   · model(boosting|logistic)과 설정: max_depth 2~8, learning_rate 0.01~0.3, max_iter 50~600, min_samples_leaf 5~200, class_weight_balanced, C 0.01~100(logistic)
   · train_window_months: 0이면 학습 구간 전체, 12~60이면 최근 N개월 기준일만 학습
   · cleaning: 데이터 정제 조치(data_profile 테이블의 집계를 근거로). 정상 기록을 지우면 재주문 라벨이 사라지므로 신중히.
+  · 도서 지식 묶음(book_type, type_season, exam_calendar): 도서 지식 에이전트가 제목으로 분류한 도서 종류(book_knowledge)와 웹에서 찾은 시험 시행 월(exam_calendar)로 만든 변수입니다. 종류별 계절성은 type_month_profile에서 볼 수 있습니다.
 - 쓰지 않는 값은 기준 모델 값(boosting, max_depth 3, learning_rate 0.05, max_iter 200, min_samples_leaf 20, C 1.0, 나머지는 비움·0·false)으로 두세요.
 - 검증 구간은 작습니다. 두 모델 비교는 scores의 delta_sd(같은 도서로 짝지어 잰 차이의 표준편차), prob_better(개선 확률), fold_deltas·folds_improved(구간별 일관성)로 판단하세요. baseline_val의 p20_sd는 점수 하나의 흔들림이라 두 모델 비교 잣대가 아닙니다. 채택 기준은 context의 decision_rule에 미리 정해져 있습니다. 여러 안을 시도할수록 최고점은 운으로 높아지므로 기준에 아슬아슬하게 걸친 안은 더 의심하세요. 이미 채점된 안과 같은 spec은 다시 채점하지 않습니다.
 - 개선안마다 근거(rationale)와 실제로 받은 근거 ID(evidence_ids)를 적으세요. 한국어로 간결하게, 최종 답은 지정된 JSON 형식으로만 내세요.'''
@@ -575,15 +644,23 @@ def run_store(lab, agents, db_path, say=print):
     best = lambda where: (db.execute(f'SELECT proposal_id FROM scores WHERE val_p20 IS NOT NULL AND {where} ORDER BY val_p20 DESC, proposal_id LIMIT 1').fetchone() or ['baseline'])[0]
     stages = {'기준 모델': 'baseline', '에이전트 1명 (A 라운드1 최고)': best("round=1 AND agent='A'"), '경쟁 (라운드1 최고)': best('round=1'),
               '토론 (전 라운드 검증 최고, 검토 없음)': best('1=1'), '적대적 검토 (최종안)': choice}
+    rejected = {r['proposal_id'] for r in out.get('rejected', [])}
+    members = sorted({p for p in passing if p not in rejected} | ({choice} & set(passing))) if choice != 'baseline' else []
+    use_ens = len(members) >= 2
+    db.execute('INSERT INTO ensemble VALUES(?,?,?)', (json.dumps(members), ENSEMBLE_RULE, int(use_ens)))
+    if use_ens:
+        stages['앙상블 (기준 통과·미거부 안 평균, 최종 산출물)'] = '+'.join(members)
     base_test = None
     for stage, pid in stages.items():
-        s = specs[pid]
-        ev_val, sc_val, _ = lab.evaluate(s, 'val')
-        ev_t, sc_t, _ = lab.evaluate(s, 'test')
-        vp, (tp, ta) = p20_ap(ev_val, sc_val)[0], p20_ap(ev_t, sc_t)
+        group = pid.split('+')
+        val = [lab.evaluate(specs[g], 'val') for g in group]
+        test = [lab.evaluate(specs[g], 'test') for g in group]
+        vp = p20_ap(val[0][0], np.mean([v[1] for v in val], axis=0))[0]
+        tp, ta = p20_ap(test[0][0], np.mean([t[1] for t in test], axis=0))
         base_test = tp if base_test is None else base_test
         db.execute('INSERT INTO final_results VALUES(?,?,?,?,?,?)', (stage, pid, vp, tp, ta, tp - base_test))
-    for r in lab.recommend(specs[choice]):
+    outs = [lab.next_scores(specs[g]) for g in (members if use_ens else [choice])]
+    for r in lab.top_list(outs[0][0], np.mean([o[1] for o in outs], axis=0)):
         db.execute('INSERT INTO recommendations VALUES(?,?,?,?,?)', (r['rank'], r['isbn'], r['title'], r['score'], r['cutoff']))
     db.commit()
     say(f'{lab.store}: 최종안 {choice} · ' + ', '.join(f'{k} {v}' for k, v in stages.items()))
@@ -645,6 +722,7 @@ def main():
     p.add_argument('--effort', default='medium', choices=['low', 'medium', 'high', 'xhigh', 'max'])
     p.add_argument('--backend', choices=['subscription', 'api'], default='subscription')
     p.add_argument('--no-llm', action='store_true')
+    p.add_argument('--no-knowledge', action='store_true', help='도서 지식 에이전트(제목 분류·시험 일정) 없이 실행')
     p.add_argument('--output', type=Path, default=ROOT.parent / '결과' / '개선')
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -668,8 +746,18 @@ def main():
     config = dict(run_id=run_id, model=args.model, effort=args.effort, backend='none' if args.no_llm else args.backend, rounds=ROUNDS, cost_usd=0.0)
     (out / 'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=1), encoding='utf8')
     started, dbs = time.time(), {}
+    know, cal, cal_detail = None, None, None
+    if agents is not None and not args.no_knowledge:
+        books = ei.STORES['예스24']['load']()[0]  # 예스24 도서 목록 = 출판사 도서 전체(교보 도서정보 + 예스24에만 있는 도서)
+        know, ksum = kn.classify(agents, books, say)
+        cal, cal_out, _ = kn.exam_calendar(agents, say)
+        cal_detail = cal_out['exams']
+        config.update(knowledge=ksum, calendar=cal)
+        say(f'지식: 분류 {ksum["books"]}종 · A·B 일치 {ksum["agreement_rate"]:.0%} · 시험 일정 ' + ', '.join(f'{k} {v}' for k, v in cal.items()))
+        (out / 'knowledge_calendar.json').write_text(json.dumps(dict(summary=ksum, calendar=cal_out), ensure_ascii=False, indent=1), encoding='utf8')
     for store in (ei.STORES if args.store == 'all' else [args.store]):
-        lab = Lab(store, load_events(OTHER[store]))
+        lab = Lab(store, load_events(OTHER[store]), know, cal)
+        lab.calendar_detail = cal_detail
         path = out / f'process_{store}.sqlite'
         if agents is None:
             db = sqlite3.connect(path); db.executescript(SCHEMA); write_stage0(db, lab); db.close()

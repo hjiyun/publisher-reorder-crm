@@ -346,6 +346,7 @@ ROLES = {
 OUT = {'analyst_A': ANALYST_OUT, 'analyst_B': ANALYST_OUT, 'moderator': MOD_OUT, 'reviewer': REVIEW_OUT}
 ROLE_TOOLS = {'analyst_A': PROFILE_TOOLS, 'analyst_B': PROFILE_TOOLS, 'moderator': list(TOOLS), 'reviewer': list(TOOLS)}
 PREFIX = {'analyst_A': 'A', 'analyst_B': 'B', 'moderator': 'M', 'reviewer': 'R'}
+ROLE_BUILTINS = {}  # 역할별로 허용하는 기본 도구(예: 시험 일정 역할의 WebSearch). 그 밖의 역할은 기본 도구 없음
 
 
 # ---------------------------------------------------------------- LLM 호출
@@ -431,12 +432,12 @@ class SubscriptionAgents(Agents):
                 return {'content': [{'type': 'text', 'text': text}], **({'is_error': True} if err else {})}
             return tool(name, TOOLS[name][0], TOOLS[name][1])(handler)
 
-        names = ROLE_TOOLS[role]
+        names, builtins = ROLE_TOOLS[role], ROLE_BUILTINS.get(role, [])
         options = ClaudeAgentOptions(
             system_prompt=ROLES[role], model=self.model, effort=self.effort,
-            tools=[],  # 파일·셸 등 기본 도구는 끄고 집계 도구만 준다
-            mcp_servers={'data': create_sdk_mcp_server(name='data', tools=[make(n) for n in names])},
-            allowed_tools=[f'mcp__data__{n}' for n in names], permission_mode='dontAsk',
+            tools=list(builtins),  # 파일·셸 등 기본 도구는 끄고, 역할에 허용한 것(예: WebSearch)만 준다
+            mcp_servers={'data': create_sdk_mcp_server(name='data', tools=[make(n) for n in names])} if names else {},
+            allowed_tools=[f'mcp__data__{n}' for n in names] + list(builtins), permission_mode='dontAsk',
             setting_sources=[],  # 사용자 설정·메모리를 불러오지 않는다
             max_turns=self.max_turns * 2, cwd=str(ROOT), cli_path=self.cli_path,
             output_format={'type': 'json_schema', 'schema': OUT[role]})
@@ -482,7 +483,8 @@ class ApiAgents(Agents):
     def _execute(self, role, ws, user, evidence):
         cost, calls, turn = 0.0, [], 0
         messages = [{'role': 'user', 'content': user}]
-        kw = dict(model=self.model, max_tokens=16000, tools=tool_defs(ROLE_TOOLS[role]),
+        tools = tool_defs(ROLE_TOOLS[role]) + ([{'type': 'web_search_20260209', 'name': 'web_search'}] if 'WebSearch' in ROLE_BUILTINS.get(role, []) else [])
+        kw = dict(model=self.model, max_tokens=16000, **({'tools': tools} if tools else {}),
                   system=[{'type': 'text', 'text': ROLES[role], 'cache_control': {'type': 'ephemeral'}}],
                   output_config={'effort': self.effort, 'format': {'type': 'json_schema', 'schema': OUT[role]}})
         while True:

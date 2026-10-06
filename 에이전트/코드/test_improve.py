@@ -37,6 +37,43 @@ class FamiliesTest(unittest.TestCase):
         self.assertEqual(a.new_6m.tolist(), [1, 0])
 
 
+class KnowledgeTest(unittest.TestCase):
+    def test_type_season_uses_only_settled_past_labels(self):
+        cuts = pd.date_range('2021-01-01', periods=30, freq='MS').strftime('%Y-%m-%d')
+        x = pd.DataFrame([dict(isbn=i, cutoff=c, label=int((int(c[5:7]) == 3) or i == 'b')) for c in cuts for i in ('a', 'b')])
+        know = pd.DataFrame({'isbn': ['a', 'b'], 'exam_type': ['DIAT', '해당 없음'], 'subject': ['멀티미디어·그래픽', '코딩·프로그래밍']})
+        k = im.add_knowledge(x, know, {'DIAT': [3, 9]})
+        row = k[(k.isbn == 'a') & (k.cutoff == '2023-03-01')].iloc[0]
+        self.assertEqual((row.type_month_rate, row.type_month_n), (1.0, 2.0))      # 2021-03, 2022-03 두 해
+        self.assertEqual(row.exam_this_month, 1.0)
+        self.assertEqual(k[(k.isbn == 'a') & (k.cutoff == '2023-02-01')].exam_next_month.iloc[0], 1.0)
+        self.assertEqual(row[f'exam_{im.kn.EXAM_TYPES.index("DIAT")}'], 1.0)
+        first = k[(k.isbn == 'a') & (k.cutoff == '2021-03-01')].iloc[0]
+        self.assertTrue(np.isnan(first.type_month_rate))                            # 과거가 없으면 비움
+        future = x.copy()
+        future.loc[future.cutoff >= '2023-03-01', 'label'] = 0                       # 기준일 이후 라벨을 바꿔도
+        k2 = im.add_knowledge(future, know, {'DIAT': [3, 9]})
+        cols = im.FAMILIES['type_season'][1]
+        pd.testing.assert_frame_equal(k[k.cutoff <= '2023-03-01'][cols].reset_index(drop=True), k2[k2.cutoff <= '2023-03-01'][cols].reset_index(drop=True))
+
+    def test_classify_merges_agreement_and_judge(self):
+        books = pd.DataFrame({'isbn': ['1', '2'], 'title': ['DIAT 멀티미디어', '엑셀 기초'], 'genre': ['컴퓨터', '컴퓨터'], 'pub': pd.to_datetime(['2022-01-01', '2023-01-01'])})
+
+        class FakeAgents:
+            def run(self, role, ws, user, fp, run_id=''):
+                meta = dict(seconds=0, cost_usd=0.0)
+                bk = lambda ref, ex: dict(ref=ref, exam_type=ex, subject='기타', audience='혼합·불명', series='', confidence='high')
+                if role == 'classifier_A':
+                    return dict(books=[bk('B001', 'DIAT'), bk('B002', 'ITQ')]), {}, meta
+                if role == 'classifier_B':
+                    return dict(books=[bk('B001', 'DIAT'), bk('B002', '해당 없음')]), {}, meta
+                return dict(books=[dict(bk('B002', '해당 없음'), reason='시험명이 없음')]), {}, meta
+        k, summary = im.kn.classify(FakeAgents(), books, say=lambda m: None)
+        self.assertEqual(k.set_index('isbn').exam_type.to_dict(), {'1': 'DIAT', '2': '해당 없음'})
+        self.assertEqual((summary['agreed'], summary['disputed']), (1, 1))
+        self.assertEqual(list(k.ref), ['B001', 'B002'])                             # 에이전트에게는 ISBN 대신 내부 번호만
+
+
 class FoldTest(unittest.TestCase):
     def test_folds_roll_forward_and_dev_comes_first(self):
         c = [f'2020-{m:02d}' for m in range(1, 13)] + [f'2021-{m:02d}' for m in range(1, 13)] + [f'2022-{m:02d}' for m in range(1, 13)]
@@ -132,8 +169,12 @@ class LabStub:
     fit_eval = im.Lab.fit_eval
     evaluate = im.Lab.evaluate
 
-    def recommend(self, s):
-        return [dict(rank=1, isbn='0', title='t', score=0.9, cutoff='2023-07-01')]
+    def next_scores(self, s):
+        nxt = pd.DataFrame({'isbn': ['0', '1'], 'cutoff': '2023-07-01'})
+        return nxt, np.array([0.9, 0.1])
+
+    def top_list(self, nxt, sc, top=0.2):
+        return [dict(rank=1, isbn=nxt.isbn[0], title='t', score=float(sc[0]), cutoff='2023-07-01')]
 
 
 class ProcessTest(unittest.TestCase):
@@ -158,7 +199,8 @@ class ProcessTest(unittest.TestCase):
         self.assertEqual(count('debate'), 6)
         self.assertEqual(db.execute('SELECT choice FROM review').fetchone()[0], 'R1-A1')
         self.assertEqual([r[0] for r in db.execute('SELECT verified FROM claims')], [1, 0])
-        self.assertEqual(count('final_results'), 5)
+        self.assertGreaterEqual(count('final_results'), 5)
+        self.assertEqual(count('ensemble'), 1)
         self.assertEqual(db.execute("SELECT test_delta_vs_base FROM final_results WHERE stage='기준 모델'").fetchone()[0], 0)
         self.assertGreater(count('evidence'), 0)
         self.assertEqual(client.calls, 14)                      # 역할 7개 × (조회 1 + 답 1)
