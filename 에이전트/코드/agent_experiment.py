@@ -84,7 +84,7 @@ def outcome(log, before, after):
     return rows, collateral
 
 
-def one(store, raw, cuts, truth, clean_snaps, rate, seed, agents, run_id, out=None, log=print):
+def one(store, raw, cuts, truth, clean_snaps, rate, seed, agents, run_id, out=None, say=print):
     books, rcvd, rtgd, sales, log = ei.inject(*raw, rate, list(ei.TYPES), seed)
     _, drop = kyobo.quality(books, rcvd, rtgd, sales)
     base = {c: as_tables(kyobo.clean(books, rcvd, rtgd, sales, drop, full)) for c, full in (('minimal', False), ('full', True))}
@@ -98,14 +98,14 @@ def one(store, raw, cuts, truth, clean_snaps, rate, seed, agents, run_id, out=No
             tables, _ = ag.apply_actions(books, tables, HEURISTIC)
         elif how == 'agent':
             context = f'{store} 자료 ({"기존 품질 점검을 거친 뒤" if start == "full" else "품질 점검 없이"})'
-            log(f'{store} {rate:.0%} s{seed} {cond}: 에이전트 검토 시작')
+            say(f'{store} {rate:.0%} s{seed} {cond}: 에이전트 검토 시작')
             rv = ag.review(agents, books, tables, context, run_id)
             tables, applied = ag.apply_actions(books, tables, rv['actions'])
             if out is not None:
                 case = f'{store}_{int(rate * 100):02d}_s{seed}_{cond}'
                 (out / 'agents').mkdir(exist_ok=True)
                 (out / 'agents' / f'{case}.json').write_text(json.dumps(dict(case=case, context=context, **rv, applied=applied), ensure_ascii=False, indent=1, default=str), encoding='utf8')
-            log(f'{store} {rate:.0%} s{seed} {cond}: 조치 {len(rv["actions"])}개 승인, 근거 없는 조치 {rv["unsupported_dropped"]}개 제외, '
+            say(f'{store} {rate:.0%} s{seed} {cond}: 조치 {len(rv["actions"])}개 승인, 근거 없는 조치 {rv["unsupported_dropped"]}개 제외, '
                 f'비용 ${rv["cost_usd"]:.2f} · ' + ', '.join(f'{m["role"]} {m["seconds"]}s' for m in rv['meta']))
             reviews[cond] = dict(actions=rv['actions'], applied=applied, unsupported_dropped=rv['unsupported_dropped'], meta=rv['meta'],
                                  cost_usd=rv['cost_usd'], findings_A=rv['analyst_A']['findings'], findings_B=rv['analyst_B']['findings'],
@@ -234,7 +234,7 @@ def main():
                 if agents is not None and agents.cost > args.max_cost:
                     config['stopped'] = f'누적 비용 ${agents.cost:.2f} > ${args.max_cost}'
                     break
-                r, d, rv = one(store, raw, cuts, truth, snaps, rate, seed, agents, run_id, out, log)
+                r, d, rv = one(store, raw, cuts, truth, snaps, rate, seed, agents, run_id, out, say=log)
                 runs += r; det += d
                 reviews.update({f'{store}/{rate:.0%}/s{seed}/{k}': v for k, v in rv.items()})
                 save()
