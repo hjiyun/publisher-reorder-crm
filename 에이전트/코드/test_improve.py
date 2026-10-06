@@ -60,6 +60,8 @@ class SpecTest(unittest.TestCase):
         out = im.verify_claims([dict(text='기준 p20', evidence_id='R-E1', value=58.77), dict(text='지어낸 값', evidence_id='R-E1', value=0.71),
                                 dict(text='없는 근거', evidence_id='R-E9', value=0.5), dict(text='열 이름 속 숫자', evidence_id='R-E1', value=20)], ev)
         self.assertEqual([c['verified'] for c in out], [1, 0, 0, 0])
+        ev2 = {'R-E2': dict(tool='query_db', input={}, result=dict(columns=['fold_deltas'], rows=[['[0.0385, 0.0526]']]))}
+        self.assertEqual(im.verify_claims([dict(text='구간2', evidence_id='R-E2', value=0.0526)], ev2)[0]['verified'], 1)
 
 
 class DbToolTest(unittest.TestCase):

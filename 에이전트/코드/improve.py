@@ -228,7 +228,8 @@ class Lab:
         x = self.snaps(s['cleaning'])
         cols = self.columns(s)
         t = self.tables if not s['cleaning'] else ag.apply_actions(self.books, self.tables, s['cleaning'])[0]
-        cut = (t['sales'].month.max() + 1).to_timestamp()
+        # 마지막 판매 달이 끝나지 않았으면(예: 예스24 10월 1~3일) 그 달 1일을 기준일로 한다
+        cut = min((t['sales'].month.max() + 1).to_timestamp(), pd.Timestamp.today().normalize().replace(day=1))
         nxt = kyobo.snapshot(self.books, t['rcvd'], t['rtgd'], t['sales'], cut).assign(cutoff=str(cut.date()), label=0, split='next')
         nxt = add_families(nxt, t['rcvd'], self.other, t['sales'])
         sc = make_model(s).fit(x[cols], x.label).predict_proba(nxt[cols])[:, 1]
@@ -495,7 +496,15 @@ def numbers(obj):
     if isinstance(obj, (int, float)):
         return [float(obj)]
     if isinstance(obj, str):
-        return [float(obj)] if re.fullmatch(r'-?\d+(\.\d+)?', obj.strip()) else []
+        t = obj.strip()
+        if re.fullmatch(r'-?\d+(\.\d+)?', t):
+            return [float(t)]
+        if t[:1] in '[{':  # 셀에 JSON으로 저장된 목록(예: fold_deltas)
+            try:
+                return numbers(json.loads(t))
+            except ValueError:
+                return []
+        return []
     if isinstance(obj, dict):
         return [n for v in obj.values() for n in numbers(v)]
     if isinstance(obj, (list, tuple)):
